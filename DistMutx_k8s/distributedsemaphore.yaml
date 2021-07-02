@@ -1,0 +1,104 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: semaphoreservice
+  labels:
+    app: semser
+
+spec:
+#  type: LoadBalancer
+  selector:
+    app: semser
+  clusterIP: None
+  ports:
+    - port: 11001
+      name: semser-port
+      protocol: TCP
+      targetPort: 11001
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  # Nombre del Pod
+  name: clientetestsem
+  labels:
+    app: semser
+spec:
+  hostname: clientetestsem
+  subdomain: semaphoreservice
+  dnsPolicy: ClusterFirst
+  # Deshabilitar la tolerancia a fallos en la ejecución del POD
+  restartPolicy: Always  # no nos interesa la tolerancia a fallos para estos
+  containers:
+    - name: clientetestsem
+      image: localhost:5000/clientetestsem:latest
+      env:
+        - name: MIDOMINIODNS
+          value: semaphoreservice.default.svc.cluster.local
+        - name: MINOMBREPOD
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
+      command:
+        - /distclient
+        - $(MINOMBREPOD).$(MIDOMINIODNS)
+        - distmutexrep-0.$(MIDOMINIODNS):11001
+      ports:
+        - containerPort: 11001
+---
+kind: StatefulSet
+apiVersion: apps/v1
+metadata:
+  name: distmutexrep
+spec:
+  serviceName: semaphoreservice
+  replicas: 5
+  selector:
+    matchLabels:
+      app: semser
+  template:
+    metadata:
+      labels:
+        app: semser
+    spec:
+      terminationGracePeriodSeconds: 10
+      containers:
+        - name: semser
+          image: localhost:5000/semser:latest
+          env:
+            - name: MISUBDOMINIO
+              value: semaphoreservice.default.svc.cluster.local
+            - name: MINOMBREPOD
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+          command: # Si es el primer nodo, semser-0, se lanza sin la opción -j
+            - sh
+            - "-c"
+            - |
+              #!/bin/sh
+              MAX_POD_NUMBER=10
+              FOUND_LEADER="false"
+              for i in $(seq 0 $MAX_POD_NUMBER); do
+                      IP_LEADER=$(echo 'RAFT LEADER' |  nc distmutexrep-$i.semaphoreservice.default.svc.cluster.local 11001)
+
+                      if [ ! -z "$IP_LEADER" ]; then
+
+                        echo $IP_LEADER | grep -qE '[0-9]+.*'
+                        if [ $? -eq 0  ] ; then
+                                echo "Cluster found on distmutexrep-$i"
+                                /distmutex -n $(MINOMBREPOD) -a $(MINOMBREPOD).$(MISUBDOMINIO):11001 -j distmutexrep-$i.$(MISUBDOMINIO):11001
+                                FOUND_LEADER="true"
+                                break
+                        fi
+                      else
+                        echo "Cluster not found on distmutexrep-$i"
+                      fi
+              done
+              if [ "$FOUND_LEADER" = "false"  ] ; then
+                echo "Cluster not found, starting a new one..."
+                /distmutex -n $(MINOMBREPOD) -a $(MINOMBREPOD).$(MISUBDOMINIO):11001
+              fi
+          ports:
+            - containerPort: 11001
+

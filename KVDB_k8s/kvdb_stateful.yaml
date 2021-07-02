@@ -1,0 +1,70 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: kvdbservice
+  labels:
+    app: kvdb
+
+spec:
+  selector:
+    app: kvdb
+  clusterIP: None
+  ports:
+    - port: 11001
+      name: kvdb-port
+      protocol: TCP
+      targetPort: 11001
+---
+kind: StatefulSet
+apiVersion: apps/v1
+metadata:
+  name: kvdbrep 
+spec:
+  serviceName: kvdbservice 
+  replicas: 3
+  selector:
+    matchLabels:
+      app: kvdb
+  template:
+    metadata:
+      labels:
+        app: kvdb
+    spec:
+      terminationGracePeriodSeconds: 10
+      containers:
+        - name: kvdbserver
+          image: localhost:5000/kvdb:latest
+          env:
+            - name: MISUBDOMINIO
+              value: kvdbservice.default.svc.cluster.local
+            - name: MINOMBREPOD
+              valueFrom:
+                  fieldRef:
+                    fieldPath: metadata.name
+            # - name: REPLICAS
+            #   valueFrom:
+            #     fieldRef:
+            #         fieldPath: spec.replicas
+          command: # Si es el primer nodo, kvdb-0, se lanza sin la opción -j
+            - sh
+            - "-c"
+            - |
+              #!/bin/sh
+                echo $(REPLICAS)
+                MAX_POD_NUMBER=10
+                FOUND_LEADER="false"
+                for i in $(seq 0 $MAX_POD_NUMBER); do            
+                        IP_LEADER=$(echo 'RAFT LEADER' |  nc kvdbrep-$i.kvdbservice.default.svc.cluster.local 11001)
+                        echo $IP_LEADER | grep -qE '[0-9]+.*'                                            
+                        if [ $? -eq 0  ] ; then                                                          
+                                echo "es ip"                                                             
+                                /kvdb -n $(MINOMBREPOD) -a $(MINOMBREPOD).$(MISUBDOMINIO):11001 -j kvdbrep-$i.$(MISUBDOMINIO):11001
+                                FOUND_LEADER="true"
+                                break                                                                    
+                        fi                                                                               
+                done
+                if [ "$FOUND_LEADER" = "false"  ] ; then
+                  /kvdb -n $(MINOMBREPOD) -a $(MINOMBREPOD).$(MISUBDOMINIO):11001
+                fi
+          ports:
+            - containerPort: 11001
